@@ -1,0 +1,110 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sonar Vision 3D</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:monospace;color:#8fe8ff;user-select:none}
+canvas{position:fixed;inset:0;width:100vw;height:100vh;touch-action:none;cursor:grab}
+#fx{position:fixed;inset:0;pointer-events:none;
+ background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,.85) 100%),
+ repeating-linear-gradient(0deg,rgba(0,0,0,.18) 0 1px,transparent 1px 3px)}
+#hud{position:fixed;left:14px;top:12px;font-size:13px;line-height:1.5;text-shadow:0 0 8px #0cf;white-space:pre;pointer-events:none}
+#btns{position:fixed;right:12px;top:12px;display:flex;flex-direction:column;gap:6px}
+button{background:rgba(0,40,60,.7);color:#8fe8ff;border:1px solid #2bc;padding:7px 12px;font:13px monospace;cursor:pointer;border-radius:3px}
+button.on{background:#0aa;color:#001}
+</style></head><body>
+<canvas id="c"></canvas><div id="fx"></div><div id="hud">conectando...</div>
+<div id="btns"><button id="b3d" class="on">Vista 3D</button><button id="btop">Vista superior (2D)</button>
+<button id="bauto" class="on">Auto-giro</button><button id="bflip">Voltear arriba/abajo</button>
+<button id="bsub">Modo submarino</button><button id="bcal">Calibrar (sala libre)</button></div>
+<script>
+const cv=document.getElementById('c'),g=cv.getContext('2d'),hud=document.getElementById('hud');
+const pc=document.createElement('canvas'),pg=pc.getContext('2d');
+let W,H,dpr=1;function rs(){dpr=devicePixelRatio||1;W=cv.width=pc.width=innerWidth*dpr;H=cv.height=pc.height=innerHeight*dpr}rs();onresize=rs;
+let data=null,gotAt=0,live=0,P=null;
+let yaw=0.6,pit=0.5,pitT=0.5,zoom=1,auto=true,flip=false,drag=false,lastPlanar=null,sub=false;
+const LV=10,STY=[];for(let i=0;i<LV;i++){const b=(i+1)/LV;STY.push(`rgba(${Math.round(255*Math.max(0,(b-.55)/.45))},${Math.round(255*Math.min(1,b*1.15))},${Math.round(255*Math.min(1,.35+b*.9))},${(0.25+b*.75).toFixed(2)})`)}
+const STYG=[];for(let i=0;i<LV;i++){const b=(i+1)/LV;STYG.push(`rgba(${Math.round(70*Math.max(0,(b-.7)/.3))},${Math.round(255*Math.min(1,.25+b*.9))},${Math.round(120*b)},${(0.25+b*.75).toFixed(2)})`)}
+function decodeBlock(d,m){const bl=d.block;if(!bl||!bl.n)return null;const bb=atob(bl.b64),n=bl.n,X=new Float32Array(n),Y=new Float32Array(n),Z=new Float32Array(n),V=new Float32Array(n);
+ for(let p=0;p<n;p++){X[p]=m.x0+(bb.charCodeAt(p*4)+.5)*m.res;Y[p]=m.y0+(bb.charCodeAt(p*4+1)+.5)*m.res;Z[p]=m.z0+(bb.charCodeAt(p*4+2)+.5)*m.res;V[p]=bb.charCodeAt(p*4+3)/255}
+ return{X,Y,Z,V,n}}
+function build(d){
+ const m=d.map;if(!m||!d.pos_m){P=null;return}
+ const bin=atob(m.b64),n=m.n,X=new Float32Array(n),Y=new Float32Array(n),Z=new Float32Array(n),V=new Float32Array(n);
+ for(let p=0;p<n;p++){X[p]=m.x0+(bin.charCodeAt(p*4)+.5)*m.res;Y[p]=m.y0+(bin.charCodeAt(p*4+1)+.5)*m.res;
+  Z[p]=m.z0+(bin.charCodeAt(p*4+2)+.5)*m.res;V[p]=bin.charCodeAt(p*4+3)/255}
+ const dist=d.pos_m.map(q=>{const a=new Float32Array(n);for(let p=0;p<n;p++)a[p]=Math.hypot(X[p]-q[0],Y[p]-q[1],Z[p]-q[2]);return a});
+ if(m.planar!==lastPlanar){lastPlanar=m.planar;if(m.planar){pitT=1.05;auto=false;yaw=0;zoom=1.7}else{pitT=.5;auto=true};setBtn()}
+ P={m,X,Y,Z,V,n,dist,cx:m.x0+m.nx*m.res/2,cy:m.y0+m.ny*m.res/2,cz:m.z0+m.nz*m.res/2,ext:m.nx*m.res/2};P.B=decodeBlock(d,m)}
+async function poll(){try{const[r,n]=await Promise.all([fetch('/api/last'),fetch('/api/nodes')]);
+ const d=await r.json();live=(await n.json()).length;
+ if(d.t&&(!data||d.t!==data.t)){data=d;gotAt=performance.now();build(d)}}catch(e){}setTimeout(poll,1000)}poll();
+function proj(x,y,z){
+ x-=P.cx;y-=P.cy;z=(flip?-1:1)*(z-P.cz);
+ const c=Math.cos(yaw),s=Math.sin(yaw),x1=x*c-y*s,y1=x*s+y*c,cp=Math.cos(pit),sp=Math.sin(pit);
+ const D=P.ext*3.2/zoom,depth=y1*cp-z*sp+D,up=z*cp+y1*sp,F=0.45*Math.min(W,H)*D/P.ext,sc=F/depth;
+ return[W/2+x1*sc,H/2-up*sc,depth,sc]}
+function line(a,b,col,w){const A=proj(...a),B=proj(...b);if(A[2]<.1||B[2]<.1)return;g.strokeStyle=col;g.lineWidth=w*dpr;g.beginPath();g.moveTo(A[0],A[1]);g.lineTo(B[0],B[1]);g.stroke()}
+let last=performance.now();
+function draw(now){
+ const dt=Math.min(.1,(now-last)/1000);last=now;const t=now/1000;
+ g.globalCompositeOperation='source-over';g.filter='none';g.fillStyle=sub?'#010a04':'#01060c';g.fillRect(0,0,W,H);
+ if(!data||!P){hud.textContent=`SONAR VISION 3D\nnodos conectados: ${live}\n${data&&data.nodes?'calibrando posiciones...':'esperando mediciones...'}`;requestAnimationFrame(draw);return}
+ if(auto&&!drag&&pitT<1.4)yaw+=dt*0.18;pit+=(pitT-pit)*Math.min(1,dt*6);
+ const m=P.m,N=P.dist.length,maxR=P.ext*(m.planar?0.75:1.2),speed=2.2,R=[];
+ for(let n=0;n<N;n++)R.push((t*speed+n*maxR/N)%maxR);
+ const pal=sub?STYG:STY,cn=[0,0];data.pos_m.forEach(p=>{cn[0]+=p[0]/N;cn[1]+=p[1]/N});const sw=(t*1.1)%(Math.PI*2);
+ // caja del volumen
+ const x0=m.x0,x1=m.x0+m.nx*m.res,y0=m.y0,y1=m.y0+m.ny*m.res,z0=m.z0,z1=m.z0+m.nz*m.res,bc='rgba(60,170,220,.22)';
+ [[x0,y0],[x1,y0],[x1,y1],[x0,y1]].forEach((a,i,arr)=>{const b=arr[(i+1)%4];line([a[0],a[1],z0],[b[0],b[1],z0],bc,1);line([a[0],a[1],z1],[b[0],b[1],z1],bc,1);line([a[0],a[1],z0],[a[0],a[1],z1],bc,1)});
+ // cuadricula de 1 m en el piso
+ const zf=m.planar?0:m.z0,gc='rgba(60,170,220,.10)';
+ for(let x=Math.ceil(x0);x<=x1;x++)line([x,y0,zf],[x,y1,zf],gc,1);
+ for(let y=Math.ceil(y0);y<=y1;y++)line([x0,y,zf],[x1,y,zf],gc,1);
+ // puntos con onda
+ pg.globalCompositeOperation='source-over';pg.clearRect(0,0,W,H);pg.globalCompositeOperation='lighter';
+ const bk=Array.from({length:LV},()=>[]);
+ for(let p=0;p<P.n;p++){if(P.V[p]<(m.planar?0.4:0.25))continue;const q=proj(P.X[p],P.Y[p],P.Z[p]);if(q[2]<.1)continue;
+  let w=0;for(let n=0;n<N;n++){const dd=P.dist[n][p]-R[n];w=Math.max(w,Math.exp(-dd*dd/0.12))}
+  let b;if(sub){let dl=(sw-Math.atan2(P.Y[p]-cn[1],P.X[p]-cn[0]))%(Math.PI*2);if(dl<0)dl+=Math.PI*2;b=Math.pow(P.V[p],.7)*(0.1+1.2*Math.exp(-dl/1.2))}else b=Math.pow(P.V[p],.7)*(0.3+1.0*w);b=b>1?1:b;const lv=Math.min(LV-1,Math.floor(b*LV));
+  const sz=Math.max(2*dpr,m.res*q[3]*(m.planar?1.5:0.8));bk[lv].push(q[0]-sz/2,q[1]-sz/2,sz)}
+ for(let l=0;l<LV;l++){pg.fillStyle=pal[l];const a=bk[l];for(let i=0;i<a.length;i+=3)pg.fillRect(a[i],a[i+1],a[i+2],a[i+2])}
+ // capa de BLOQUEO: lo que se interpone entre celulares (naranja/rojo)
+ if(P.B){const B=P.B,bb=[[],[],[],[],[]];
+  for(let p=0;p<B.n;p++){if(B.V[p]<0.2)continue;const q=proj(B.X[p],B.Y[p],B.Z[p]);if(q[2]<.1)continue;const sz=Math.max(2.5*dpr,m.res*q[3]*1.2);bb[Math.min(4,Math.floor(B.V[p]*5))].push(q[0]-sz/2,q[1]-sz/2,sz)}
+  const pu=0.85+0.15*Math.sin(t*5);for(let l=0;l<5;l++){pg.fillStyle=`rgba(255,${Math.round(150-l*28)},40,${((0.07+l*0.07)*pu).toFixed(2)})`;const a=bb[l];for(let i=0;i<a.length;i+=3)pg.fillRect(a[i],a[i+1],a[i+2],a[i+2])}}
+ g.globalCompositeOperation='lighter';g.filter=`blur(${5*dpr}px)`;g.drawImage(pc,0,0);g.filter='none';g.drawImage(pc,0,0);
+ g.globalCompositeOperation='source-over';
+ // modo submarino: anillos de distancia y haz de barrido
+ if(sub){for(let k=1;k<=P.ext;k++){let prv=null;for(let i=0;i<=64;i++){const th=i/64*Math.PI*2,w=[cn[0]+Math.cos(th)*k,cn[1]+Math.sin(th)*k,zf];if(prv)line(prv,w,'rgba(60,255,120,.14)',1);prv=w}}
+  for(let i=0;i<14;i++){const an=sw-i*0.035;line([cn[0],cn[1],zf],[cn[0]+Math.cos(an)*P.ext,cn[1]+Math.sin(an)*P.ext,zf],`rgba(80,255,130,${((1-i/14)*.7).toFixed(2)})`,i?1:2)}}
+ // celulares y ondas esfericas
+ g.font=12*dpr+'px monospace';
+ data.pos_m.forEach((p,n)=>{const k=1-R[n]/maxR,col=sub?`rgba(80,255,130,${(0.38*k).toFixed(2)})`:`rgba(120,230,255,${(0.38*k).toFixed(2)})`,r=R[n];
+  for(let a=0;a<(m.planar?1:3);a++){let prev=null;for(let i=0;i<=48;i++){const th=i/48*Math.PI*2,c=Math.cos(th)*r,s=Math.sin(th)*r;
+   const w=a==0?[p[0]+c,p[1]+s,p[2]]:a==1?[p[0]+c,p[1],p[2]+s]:[p[0],p[1]+c,p[2]+s];
+   if(prev)line(prev,w,col,1.5);prev=w}}
+  const q=proj(p[0],p[1],p[2]);if(q[2]<.1)return;
+  g.fillStyle='#fff';g.shadowBlur=16;g.shadowColor='#4df';g.beginPath();g.arc(q[0],q[1],5*dpr,0,7);g.fill();g.shadowBlur=0;
+  g.fillStyle='rgba(160,240,255,.9)';g.fillText(data.nodes[n],q[0]+9*dpr,q[1]-9*dpr)});
+ const la={};(data.links||[]).forEach(l=>{la[l.a+'|'+l.b]=l;la[l.b+'|'+l.a]=l});
+ data.pos_m.forEach((a,i)=>data.pos_m.forEach((b,j)=>{if(j<=i)return;const dd=data.dist_m[i]&&data.dist_m[i][j];if(dd==null||dd!==dd)return;
+  const L=la[data.nodes[i]+'|'+data.nodes[j]],at=L&&!L.calib?L.att:0,hot=at>=3;
+  line(a,b,hot?`rgba(255,${Math.round(220-at*12)},50,.95)`:(sub?'rgba(80,255,130,.4)':'rgba(120,230,255,.35)'),hot?1.5+at/4:1);
+  const A=proj(...a),B=proj(...b);g.fillStyle=hot?'rgba(255,190,90,1)':'rgba(190,245,255,.9)';g.fillText(dd.toFixed(2)+' m'+(hot?`  bloqueado ${at.toFixed(0)} dB`:''),(A[0]+B[0])/2,(A[1]+B[1])/2-4*dpr)}));
+ const age=(performance.now()-gotAt)/1000;
+ const blk=(data.links||[]).filter(l=>!l.calib&&l.att>=5),cal=(data.links||[]).some(l=>l.calib);
+ hud.textContent=`${sub?'SONAR SUBMARINO':'SONAR VISION 3D'}\nnodos: ${data.nodes.length} (conectados ${live})   puntos: ${P.n}\nultimo barrido: hace ${age.toFixed(0)}s\narrastra = girar · rueda = zoom`+
+  (blk.length?'\n>>> OBJETO ENTRE: '+blk.map(l=>l.a+' <-> '+l.b+' ('+l.att.toFixed(0)+' dB)').join(', '):cal?'\ncalibrando enlaces: deja la sala libre unas rondas...':'\nenlaces libres')+(m.planar?'\nmapa plano (celulares a la misma altura): vista de planta. Para 3D real, ponlos a distintas alturas':data.nodes.length<4?'\n(con menos de 4 celulares el 3D es aproximado)':'');
+ requestAnimationFrame(draw)}
+requestAnimationFrame(draw);
+if(location.hash==='#sub'){sub=true;bsub.classList.add('on')}
+let lx=0,ly=0;
+cv.onpointerdown=e=>{drag=true;lx=e.clientX;ly=e.clientY;cv.setPointerCapture(e.pointerId);cv.style.cursor='grabbing'};
+cv.onpointerup=()=>{drag=false;cv.style.cursor='grab'};
+cv.onpointermove=e=>{if(!drag)return;yaw+=(e.clientX-lx)*.008;pitT=pit=Math.max(-.2,Math.min(Math.PI/2,pit+(e.clientY-ly)*.008));lx=e.clientX;ly=e.clientY;setBtn()};
+cv.onwheel=e=>{e.preventDefault();zoom=Math.max(.4,Math.min(4,zoom*(e.deltaY<0?1.1:.9)))};
+function setBtn(){b3d.classList.toggle('on',pitT<1.4);btop.classList.toggle('on',pitT>=1.4);bauto.classList.toggle('on',auto)}
+b3d.onclick=()=>{pitT=.5;setBtn()};btop.onclick=()=>{pitT=Math.PI/2;yaw=0;setBtn()};
+bauto.onclick=()=>{auto=!auto;setBtn()};bflip.onclick=()=>{flip=!flip};
+bsub.onclick=()=>{sub=!sub;bsub.classList.toggle('on',sub)};
+bcal.onclick=async()=>{try{const r=await (await fetch('/api/calibrate')).json();bcal.textContent='Calibrando...';setTimeout(()=>bcal.textContent='Calibrar (sala libre)',4000)}catch(e){}};
+</script></body></html>

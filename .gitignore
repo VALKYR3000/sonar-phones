@@ -1,0 +1,7 @@
+# Secretos: el certificado se regenera solo al arrancar server.py
+key.pem
+cert.pem
+*.pem
+# Grabaciones de audio de depuracion (--debug)
+*.npz
+__pycache__/

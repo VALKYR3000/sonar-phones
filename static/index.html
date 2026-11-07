@@ -1,0 +1,51 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sonar nodo</title>
+<style>body{font-family:sans-serif;background:#111;color:#eee;padding:16px}button{font-size:20px;padding:14px;width:100%}#log{white-space:pre-wrap;font-size:13px;margin-top:12px}</style></head>
+<body><h2>Nodo sonar v6</h2>
+<input id="name" placeholder="nombre (ej. sala)" style="width:100%;font-size:18px;padding:8px;margin-bottom:8px">
+<button id="start">Iniciar nodo</button><div id="log"></div>
+<script>
+const logEl=document.getElementById('log'),log=m=>{logEl.textContent=m+"\n"+logEl.textContent.slice(0,1500)};
+let ctx,stream,src,proc,sock=null,cur=null,busy=false,started=false;const CID=Math.random().toString(36).slice(2);
+function mkChirp(fs,f0,f1,T){const n=Math.floor(T*fs),k=(f1-f0)/T,a=new Float32Array(n);
+ for(let i=0;i<n;i++){const t=i/fs;a[i]=Math.sin(2*Math.PI*(f0*t+0.5*k*t*t))*(0.5-0.5*Math.cos(2*Math.PI*i/(n-1)));}return a;}
+function finish(c){ // enviar la grabacion de esta ronda
+ if(c.sent)return;c.sent=true;clearTimeout(c.tm);
+ const out=new Float32Array(c.n);let o=0;c.chunks.forEach(x=>{out.set(x,o);o+=x.length});
+ try{sock.send(JSON.stringify({type:"meta",fs:c.fs,round:c.round}));sock.send(out.buffer);log("enviado turno "+c.slot+" ronda "+c.round+" ("+(c.n/c.fs).toFixed(1)+" s)")}
+ catch(e){log("ERROR al enviar: "+e)}
+ cur=null;busy=false}
+async function init(){
+ ctx=new AudioContext({sampleRate:48000});await ctx.resume();
+ ctx.onstatechange=()=>{log("audio: "+ctx.state);if(ctx.state!=="running")ctx.resume()};
+ stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
+ src=ctx.createMediaStreamSource(stream);
+ const code="class R extends AudioWorkletProcessor{process(i){const c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor('rec',R)";
+ await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code],{type:'application/javascript'})));
+ proc=new AudioWorkletNode(ctx,'rec');
+ proc.port.onmessage=e=>{const c=cur;if(!c||c.sent)return;c.chunks.push(e.data);c.n+=e.data.length;if(c.n>=c.need)finish(c)};
+ const mute=ctx.createGain();mute.gain.value=0;src.connect(proc);proc.connect(mute);mute.connect(ctx.destination);
+ try{await navigator.wakeLock.request('screen')}catch(e){}
+ log("audio listo, fs="+ctx.sampleRate);
+}
+function connect(){
+ if(sock&&sock.readyState<=1)return;          // ya hay una conexion: nunca abrir otra
+ const w=new WebSocket("wss://"+location.host+"/ws");w.binaryType="arraybuffer";sock=w;
+ w.onopen=()=>{w.send(JSON.stringify({type:"hello",cid:CID,name:document.getElementById('name').value||undefined}));log("conectado")};
+ w.onclose=()=>{if(sock===w){sock=null;log("desconectado, reintentando");setTimeout(connect,2000)}};
+ w.onmessage=e=>{const d=JSON.parse(e.data);if(d.type!=="go")return;
+  if(busy){w.send(JSON.stringify({type:"err",msg:"ocupado, orden ignorada"}));return}
+  try{
+   busy=true;w.send(JSON.stringify({type:"ack",state:ctx.state,round:d.round}));
+   const fs=ctx.sampleRate,one=mkChirp(fs,d.f0,d.f1,d.chirp);
+   const buf=ctx.createBuffer(1,Math.ceil((d.offs[d.offs.length-1]+d.chirp)*fs)+1,fs),tr=new Float32Array(buf.length);
+   d.offs.forEach(o=>tr.set(one,Math.round(o*fs)));buf.copyToChannel(tr,0);
+   const s=ctx.createBufferSource();s.buffer=buf;s.connect(ctx.destination);
+   cur={chunks:[],n:0,need:Math.round(d.dur*fs),fs,round:d.round,slot:d.slot,sent:false};
+   cur.tm=setTimeout(()=>{if(cur)finish(cur)},(d.dur+6)*1000); // respaldo si el audio se detiene
+   s.start(ctx.currentTime+(d.slot+1)*d.gap);
+  }catch(err){busy=false;cur=null;log("ERROR: "+err);try{w.send(JSON.stringify({type:"err",msg:String(err)}))}catch(_){}}
+ };
+}
+const bt=document.getElementById('start');bt.onclick=async()=>{if(started)return;started=true;bt.disabled=true;bt.textContent='Nodo activo';try{await init();connect()}catch(e){started=false;bt.disabled=false;bt.textContent='Iniciar nodo';log("error: "+e)}};
+</script></body></html>

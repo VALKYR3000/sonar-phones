@@ -1,0 +1,4 @@
+aiohttp
+numpy
+scipy
+matplotlib   # solo para test_sim.py
